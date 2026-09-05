@@ -26,8 +26,8 @@ if t is None:
     st.stop()
 secs = S.build(t, st.session_state.human)
 
-# ★ 리포트 차트에 쓸 분해 축. 내 데이터의 컬럼명으로 바꾼다.
-DIM = "device"
+# ★ 리포트 차트에 쓸 분해 축. 대시보드 DIMS 와 같은 컬럼(cases_synthetic).
+DIM = "host_identified"
 
 st.markdown('<div style="font-size:24px;font-weight:800;margin-bottom:16px">'
             '리포트</div>', unsafe_allow_html=True)
@@ -81,6 +81,7 @@ with body:
             bi = max(int(f.index[f.is_bottleneck][0]), 1)
             g = M.funnel_by(t["funnel_events_synthetic"], t["cases_synthetic"], DIM,
                             f.step.iloc[bi - 1], f.step.iloc[bi])
+            g = g[g["사유"].isna()]          # 못 믿는 칸은 차트에 안 그린다
             st.image(pdf_charts.device_png(g), width="stretch")
         if "experiments" in sec.get("charts", []):
             st.image(pdf_charts.experiments_png(M.experiment_results(t)),
@@ -91,6 +92,14 @@ with body:
             ui.callout(sec["hint"], "info")
         txt = st.text_area("본문", value=sec["body"], height=280,
                            key=f"h_{sec['title']}", label_visibility="collapsed")
+        # 사람이 쓴 장에도 인과 단정 표현 검사를 건다 — 자동 생성 장보다 여기서
+        # "때문에" 류가 더 자주 나온다 (Day4 실습 B).
+        bad = S.check_phrasing(txt)
+        if bad:
+            ui.callout(f"인과를 단정하는 표현이 있습니다: <b>{', '.join(bad)}</b>. "
+                       f"관측 데이터로는 인과를 주장할 수 없습니다.")
+        elif txt.strip():
+            st.caption("✓ 인과 단정 표현 검사 통과")
         if st.button("저장", type="primary"):
             st.session_state.human[sec["title"]] = txt
             st.rerun()
@@ -108,6 +117,7 @@ with c1:
             bi = max(int(f.index[f.is_bottleneck][0]), 1)
             g = M.funnel_by(t["funnel_events_synthetic"], t["cases_synthetic"], DIM,
                             f.step.iloc[bi - 1], f.step.iloc[bi])
+            g = g[g["사유"].isna()]          # 못 믿는 칸은 차트에 안 그린다
             charts = {
                 "funnel": pdf_charts.funnel_png(f),
                 "device": pdf_charts.device_png(g),

@@ -57,8 +57,8 @@ check(click(at, "통과시키기") and "2" in at.session_state.run["gates"],
 
 print("\n3. 대시보드 조작")
 at.switch_page("pages/2_대시보드.py").run()
-at.radio[0].set_value("채널별").run()
-check(not at.exception, "기기별/채널별 전환")
+at.segmented_control[0].set_value("country").run()
+check(not at.exception, "분해 축 전환 (국가 — 얇은 칸 감춤 포함)")
 if at.slider:
     at.slider[0].set_value(100).run()
     check(not at.exception, "개선 효과 계산기")

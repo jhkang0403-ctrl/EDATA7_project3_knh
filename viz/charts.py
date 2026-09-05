@@ -35,15 +35,15 @@ def funnel_bars(f):
     text = []
     for _, r in f.iterrows():
         if r.step_rate == r.step_rate:
-            text.append(f"{r.n:,}명 · 전 단계의 {r.step_rate*100:.1f}%")
+            text.append(f"{r.n:,}건 · 전 단계의 {r.step_rate*100:.1f}%")
         else:
-            text.append(f"{r.n:,}명")
+            text.append(f"{r.n:,}건")
     fig = go.Figure(go.Bar(
         x=f.n, y=f.label, orientation="h",
         marker=dict(color=colors, line=dict(width=0)),
         text=text, textposition="outside",
         textfont=dict(size=12, color=C.BRAND["muted"]),
-        hovertemplate="%{y}<br>%{x:,}명<extra></extra>",
+        hovertemplate="%{y}<br>%{x:,}건<extra></extra>",
     ))
     fig.update_yaxes(autorange="reversed", showgrid=False,
                      tickfont=dict(size=13))
@@ -59,7 +59,7 @@ def device_compare(g):
     fig = go.Figure(go.Bar(
         x=g.전환율 * 100, y=g[g.columns[0]], orientation="h",
         marker=dict(color=colors, line=dict(width=0)),
-        text=[f"{v*100:.1f}%  ({n:,}명 중 {c:,}명)"
+        text=[f"{v*100:.1f}%  ({n:,}건 중 {c:,}건)"
               for v, n, c in zip(g.전환율, g.도달, g.전환)],
         textposition="outside", textfont=dict(size=12, color=C.BRAND["muted"]),
         hovertemplate="%{y}<br>%{x:.1f}%<extra></extra>",
@@ -95,17 +95,33 @@ def forest(res):
     return _base(fig, height=86, margin=dict(l=8, r=8, t=6, b=22))
 
 
-def spark(series, color=None):
-    """지표 카드의 소형 추이선. 축도 눈금도 없다 — 모양만 본다."""
+def spark(series, color=None, height=44, show_edges=False):
+    """지표 카드의 소형 추이선. 축도 눈금도 없다 — 모양만 본다.
+
+    height 는 카드 레이아웃에 맞춰 호출부가 조절한다 (기본 44는 표 셀 안 크기).
+    show_edges 를 켜면 **양 끝 눈금만** 보인다 — 이 선이 어느 구간인지 모르면
+    모양을 읽을 수 없어서다. 중간 눈금은 넣지 않는다 (스파크라인의 목적이 아니다).
+    """
+    x = [str(v) for v in getattr(series, "index", range(len(series)))]
     fig = go.Figure(go.Scatter(
-        y=list(series), mode="lines",
+        x=x, y=list(series), mode="lines",
         line=dict(color=color or C.BRAND["primary"], width=2, shape="spline"),
         fill="tozeroy", fillcolor="rgba(79,70,229,0.08)",
         hoverinfo="skip"))
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False,
                      range=[min(series) * 0.97, max(series) * 1.03])
-    return _base(fig, height=44, margin=dict(l=0, r=0, t=0, b=0))
+    # 양 끝 라벨은 축 눈금이 아니라 **주석**으로 찍는다. 카테고리 축의 눈금 위치는
+    # plotly.js 버전마다 다르게 해석돼 어떤 번들에서는 아무것도 안 그려진다
+    # (Streamlit 이 그 경우다). 주석은 x·y 종류와 버전에 안 휘둘린다.
+    if show_edges and len(x) >= 2:
+        for xa, label, anchor in ((0, x[0], "left"), (1, x[-1], "right")):
+            fig.add_annotation(
+                x=xa, y=0, xref="paper", yref="paper", text=label,
+                showarrow=False, xanchor=anchor, yanchor="top", yshift=-4,
+                font=dict(size=10, color=C.BRAND["muted"]))
+    return _base(fig, height=height,
+                 margin=dict(l=0, r=0, t=0, b=18 if show_edges else 0))
 
 
 def peeking(df, final_lift):
@@ -142,30 +158,6 @@ def effect_decay(w):
                      ticksuffix="%", tickfont=dict(size=11,
                                                    color=C.BRAND["muted"]))
     return _base(fig, height=240, margin=dict(l=8, r=8, t=12, b=8))
-
-
-def cac_compare(g):
-    """CAC와 유효 CAC를 나란히. 순위가 뒤집히는 것을 보이는 것이 목적이다."""
-    g = g.sort_values("CAC")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        name="CAC", y=g.channel, x=g.CAC, orientation="h",
-        marker=dict(color=C.BRAND["line"], line=dict(width=0)),
-        text=[f"{v:,.0f}" for v in g.CAC], textposition="inside",
-        textfont=dict(size=11, color=C.BRAND["ink"]),
-        hovertemplate="%{y} CAC %{x:,.0f}원<extra></extra>"))
-    fig.add_trace(go.Bar(
-        name="유효 CAC", y=g.channel, x=g.유효CAC, orientation="h",
-        marker=dict(color=[C.COLORS["block"] if r else C.BRAND["primary"]
-                           for r in g.역전], line=dict(width=0)),
-        text=[f"{v:,.0f}" for v in g.유효CAC], textposition="outside",
-        textfont=dict(size=11, color=C.BRAND["muted"]),
-        hovertemplate="%{y} 유효 CAC %{x:,.0f}원<extra></extra>"))
-    fig.update_layout(barmode="group", bargap=0.35, bargroupgap=0.05)
-    fig.update_yaxes(showgrid=False, tickfont=dict(size=13))
-    fig.update_xaxes(visible=False, range=[0, g.유효CAC.max() * 1.28])
-    return _base(fig, height=64 * len(g) + 30,
-                 margin=dict(l=8, r=8, t=4, b=4))
 
 
 def trend(m, col, suffix=""):

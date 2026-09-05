@@ -132,7 +132,7 @@ if run["step"] >= 3 and not gates.is_passed(run, 1):
     st.markdown(body, unsafe_allow_html=True)
 
     note = st.text_input("판단 근거 (기록에 남습니다)",
-                         placeholder="예: 기존 고객은 퍼널 이력이 없는 것이 정상이므로 진행")
+                         placeholder="예: 합성 데이터가 PERIOD 를 넘는 것은 설계상 정상이므로 진행")
     a, b = st.columns([1, 1])
     with a:
         if st.button("되돌리기"):
@@ -158,7 +158,7 @@ if gates.is_passed(run, 1):
     if "계산 완료" not in [l["msg"][:5] for l in run["log"]]:
         gates.log(run, f"계산 완료 · 퍼널 {len(f)}단계 · 실험 {len(res)}건")
 
-    cols = st.columns(4)
+    cols = st.columns(len(k))   # 지표 개수가 늘어도 조용히 잘리지 않게
     for col, (name, v) in zip(cols, k.items()):
         with col:
             st.markdown(ui.kpi_card(name, v["fmt"].format(v["value"]), "",
@@ -183,7 +183,7 @@ if gates.is_passed(run, 1) and not gates.is_passed(run, 2):
                 f'확인하십시오. 되돌릴 수 있습니다.</div></div>',
                 unsafe_allow_html=True)
     note2 = st.text_input("판단 근거", key="g2",
-                          placeholder="예: 전환율 3.72%는 직전 분기와 유사")
+                          placeholder="예: 승인율 79.0%·반려율 18.3%가 notes 실측값과 일치")
     a, b = st.columns([1, 1])
     with a:
         if st.button("되돌리기", key="r2"):
