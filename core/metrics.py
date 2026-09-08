@@ -448,19 +448,24 @@ def vintage_verdict(vf: pd.DataFrame) -> pd.DataFrame:
 # ── KPI ───────────────────────────────────────────────────────────
 #
 # 지표 넷 (내가 정한 것). 그레인은 GRN 1건, 분모 "접수"는 전체 GRN.
-# 시계열(monthly)은 **종결일 기준 연도별** — 접수일은 2016년까지만 있고,
+# 시계열(monthly)은 **종결일 기준 연도별** — 접수일은 2016년까지 사실상 완전하고
+# 2017~2019 는 5건뿐이라(2017:2 · 2018:1 · 2019:2) 그 뒤로는 감시가 안 된다.
 # 월로 자르면 314개월 전부 표본 부족(월평균 4건)이라 굵게 묶는다.
 #
 #   신규 과제 수     GRASNotices 행 수                     (연도별 = 종결연도 건수)
 #   최종 승인율      no_questions ÷ 접수                    THRESHOLDS 로 색 판정
-#   평균 처리 일수    median(종결일 − 접수일)  ⚠ 1998~2019만  (접수일 없는 최근 건 제외)
-#   반려율          (no_basis + ceased) ÷ 접수  = 무사 종결도 미종결도 아닌 비율
+#   평균 처리 일수    median(종결일 - 접수일)  ⚠ N=676     (아래 lead_days 주 참조)
+#   반려율          (no_basis + ceased) ÷ 접수
 #
 # ⚠ 평균 처리 일수 · 반려율은 **높을수록 나쁜** 지표다. THRESHOLDS 엔트리에
 #   "높을수록_나쁨": True 를 넣어야 status_of() 색이 뒤집히지 않는다.
 
 _APPROVE = "no_questions"
-_REJECT = ("no_basis", "ceased")   # 무사 종결(no_questions)도 미종결(Pending)도 아닌 것
+# ⚠ 반려는 "무사 종결도 미종결도 아닌 것" 과 **같지 않다.** cat 에는 MIXED 가 1건 있고
+#   그 건은 no_questions 도 Pending 도 no_basis/ceased 도 아니라 어느 분자에도 안 들어간다.
+#   그래서 갈래 합계가 전체와 1건 어긋난다 — 검산할 때 이 1건을 찾느라 헤매지 않도록 적어 둔다.
+#       승인 1,056 + 반려 244 + Pending 35 = 1,335   /   전체 1,336   (차 1 = MIXED)
+_REJECT = ("no_basis", "ceased")
 
 
 def _grn_frame(t: dict) -> pd.DataFrame:
@@ -478,6 +483,12 @@ def _grn_frame(t: dict) -> pd.DataFrame:
     # ⚠ GRN 813·824 는 접수일 == 종결일 (lead 0). 0일 심사는 없다 —
     #   접수일이 종결일로 백필된 데이터 아티팩트로 보고 처리일수에서 뺀다.
     #   (전 구간에서 lead <= 0 인 건은 이 둘뿐)
+    #
+    #   ★ 그래서 이 지표의 표본은 **676** 이지 678 이 아니다.
+    #     접수일이 있는 GRN 678건 - 위 2건 = 676.  다시 세어볼 사람을 위해:
+    #         빼기 전  N=678 · 평균 195.0일 · 중앙 176일 · P90 290일
+    #         코드 값  N=676 · 평균 195.6일 · 중앙 176일 · P90 290일   <- kpis() 가 내는 값
+    #     중앙값은 같아서 카드 숫자는 안 흔들리지만 평균·N 은 다르다.
     d.loc[d.lead_days <= 0, "lead_days"] = pd.NA
     d["lead_days"] = pd.to_numeric(d["lead_days"], errors="coerce")
     d["year"] = d.closed.dt.year
