@@ -851,3 +851,431 @@ def weekly_effect(res: dict, start: str, bucket_days: int = 14) -> pd.DataFrame:
     g = g.reset_index()
     g["label"] = g.b.apply(lambda i: f"{int(i)*2+1}~{int(i)*2+2}주")
     return g
+
+
+# ── 제안서 주제 후보 ──────────────────────────────────────────────
+#
+# ★ Day3(9주차) 실습 A. **하나만 고르지 않는다.**
+#   발견 하나로 제안서 하나를 만들면 그날 눈에 띈 것이 그대로 이번 분기의
+#   우선순위가 되어 버린다. 뽑을 수 있는 만큼 뽑아 놓고 **사람이 고른다.**
+#
+# 기각과 "못 믿을 것"은 다르다 — 섞으면 안 된다.
+#     기각      비교했는데 차이가 작다   -> 목록에 남긴다. 기각사유를 채운다
+#     못 믿을 것 비교 자체가 안 된다     -> 애초에 후보로 만들지 않는다
+#
+# 지우면 "안 봤다"와 "보고 아니었다"가 구분되지 않는다.
+
+#: 규모 환산의 분모로 쓸 **최근 완결연도 수.** 지금 운영 규모에 가깝게 잰다.
+#: PERIOD 전체(28.1년) 평균은 연 47.5건인데, 초기 몇 해가 연 20건대라 현재를 대표하지 못한다.
+RECENT_YEARS = 10
+
+
+def _per_year(t: dict) -> tuple[float, str]:
+    """연간 건수와 그 근거 한 줄.
+
+    ⚠ **완결된 해만 센다.** PERIOD 마지막 해는 반쪽이라(종결일 최댓값이 연중이다)
+      평균에 넣으면 값을 끌어내린다 — "완결된 기간만 비교한다"를 분모에도 적용한다.
+    ⚠ 현재 시각을 쓰지 않는다. 기간은 config.PERIOD 에서만 온다 (재현).
+    """
+    last_full = pd.Timestamp(C.PERIOD[1]).year - 1
+    first = last_full - RECENT_YEARS + 1
+    m = monthly(t)
+    idx = [i for i in m.index if first <= int(i) <= last_full]
+    if not idx:                                    # 연도가 모자라면 전체 평균으로
+        a, b = pd.Timestamp(C.PERIOD[0]), pd.Timestamp(C.PERIOD[1])
+        yrs = (b - a).days / 365.25
+        n = int(t["GRASNotices"]["grn"].nunique())
+        return n / yrs, f"PERIOD 전체 {yrs:.1f}년 평균"
+    v = float(m.loc[idx, "신규 과제 수"].mean())
+    return v, (f"최근 {len(idx)} 완결연도({idx[0]}~{idx[-1]}) 평균 · "
+               f"{pd.Timestamp(C.PERIOD[1]).year}년은 반쪽이라 뺐다")
+
+
+def _per_year_plain(t: dict) -> str:
+    """연간 건수의 근거를 **읽는 사람 말로.** 계산식·코드 용어를 쓰지 않는다.
+
+    결재 문서에 계산 과정을 넣지 않는다 (Day3 판단 기준 1). 다만 **가정은 남긴다** —
+    환산에 가정이 안 붙으면 예측을 실측처럼 쓰는 것이다.
+    """
+    v, _ = _per_year(t)
+    last_full = pd.Timestamp(C.PERIOD[1]).year - 1
+    first = last_full - RECENT_YEARS + 1
+    return (f"최근 {RECENT_YEARS}년({first}~{last_full}) 평균인 연 {v:.1f}건이 "
+            f"이어진다고 보았습니다. {pd.Timestamp(C.PERIOD[1]).year}년은 "
+            f"아직 반년치라 평균에서 뺐습니다.")
+
+
+def _gap_pp(hi: float, lo: float) -> float:
+    """두 비율의 격차(%p). **표시값끼리 뺀다.**
+
+    원본 비율끼리 빼고 나중에 반올림하면 문서에 적힌 두 값의 차와 어긋난다 —
+    91.25 와 77.56 이 적혀 있는데 격차가 13.70 이면 읽는 사람이 계산을 의심한다.
+    소수 둘째 자리까지 맞춘다. (2026-09-10 결정)
+    """
+    return round(round(hi * 100, 2) - round(lo * 100, 2), 2)
+
+
+def _real_funnel(t: dict) -> list[dict]:
+    """실측 퍼널을 **스냅샷에서 직접** 센다.
+
+    funnel() 에는 실측을 못 먹인다(이벤트 로그를 요구, 어댑터 미정). 다만 세 단계가
+    전부 GRN 1행짜리 속성이라 값 자체는 여기서 세어진다. → CLAUDE.md 퍼널 절
+    """
+    g = t["GRASNotices"]
+    cat = g["cat"].astype(str)
+    n_sub = int(g["grn"].nunique())
+    n_close = int(g.loc[cat != "Pending", "grn"].nunique())
+    n_ok = int(g.loc[cat == _APPROVE, "grn"].nunique())
+    return [
+        {"step": C.FUNNEL_STEPS[0], "n": n_sub, "rate": None},
+        {"step": C.FUNNEL_STEPS[1], "n": n_close, "rate": n_close / n_sub},
+        {"step": C.FUNNEL_STEPS[2], "n": n_ok, "rate": n_ok / n_close},
+    ]
+
+
+def _real_dim_cells(t: dict, real_col: str) -> list[dict]:
+    """실측 축 한 개를 종결 -> 결과 구간에서 쪼갠다. **trust_check 를 그대로 적용한다.**
+
+    못 믿을 칸은 값을 만들지 않는다 — 후보로도 만들지 않는다.
+    """
+    g = t["GRASNotices"]
+    cat = g["cat"].astype(str)
+    closed = g[cat != "Pending"]
+    total = len(closed)
+    out = []
+    for val, sub in closed.groupby(closed[real_col].astype(str), sort=False):
+        n = len(sub)
+        conv = int((sub["cat"].astype(str) == _APPROVE).sum())
+        reason = trust_check(n, pending=0, category=str(val))
+        out.append({"칸": str(val), "도달": n, "전환": conv,
+                    "전환율": None if reason else conv / n,
+                    "비중": None if reason else n / total,
+                    "사유": reason})
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def proposal_topics(t: dict) -> list[dict]:
+    """제안서로 쓸 만한 주제 후보를 **가능한 만큼** 뽑는다.
+
+    ★ Day3 실습 A 프롬프트 1.
+
+    후보가 나오는 곳 넷 — 이 도메인의 사정을 반영했다:
+
+        ① 퍼널 구간   단계가 셋이라 **구간이 둘뿐**이다. 비교가 한 쌍만 나온다
+        ② 분해 축     config.FUNNEL_DIMS. ⚠ 키는 합성 컬럼, 실측 컬럼은 "real" 값
+        ③ 임계값      config.THRESHOLDS 를 벗어난 지표. **지금은 0개다 — 0개도 결과다**
+        ④ 추세       monthly() 는 **연도별**이다. 완결된 두 해만 비교한다
+
+    규모 = 격차 x 비중 x 연간 건수.  갈래마다 격차·비중이 무엇인지는 아래 각 절에.
+    **금액으로 환산하지 않는다** — 이 데이터에 금액 컬럼이 없다. 건수로만.
+
+    반환: 후보 리스트. 규모 큰 순, 기각된 것은 맨 뒤.
+        {"키", "갈래", "제목", "한줄", "규모_연간건수", "격차_%p", "비중",
+         "근거축", "구간", "기각사유", "가정"}
+
+    ⚠ 후보가 5개 미만으로 나와도 억지로 늘리지 않는다. 축이 둘, 구간이 둘인 도메인이다.
+    """
+    per_year, per_year_why = _per_year(t)
+    n_total = int(t["GRASNotices"]["grn"].nunique())
+    plain = _per_year_plain(t)          # 문서에 그대로 나갈 문장 (코드 용어 없음)
+    base = ["규모 = 격차 x 비중 x 연간 건수",
+            f"연간 건수 = 연 {per_year:.1f}건 ({per_year_why})",
+            f"⚠ PERIOD 전체 {n_total:,}건 평균은 연 47.5건이다. 초기 몇 해가 얇아 "
+            f"현재를 대표하지 못해 최근 {RECENT_YEARS}년을 썼다",
+            "금액 컬럼이 없어 건수로만 낸다"]
+    out: list[dict] = []
+
+    # ── ① 퍼널 구간 ───────────────────────────────────────────────
+    #   격차 = 가장 낮은 구간과 그다음으로 낮은 구간의 전환율 차
+    #   비중 = 그 구간 시작 단계에 도달한 비율 (전체 제출 대비)
+    f = _real_funnel(t)
+    segs = [(f[i - 1], f[i]) for i in range(1, len(f)) if f[i]["rate"] is not None]
+    segs.sort(key=lambda s: s[1]["rate"])
+    if len(segs) >= 2:
+        (lo_a, lo_b), (nx_a, nx_b) = segs[0], segs[1]
+        gap = _gap_pp(nx_b["rate"], lo_b["rate"])
+        share = lo_a["n"] / f[0]["n"]
+        out.append({
+            "키": "seg_" + lo_a["step"] + "_" + lo_b["step"],
+            "갈래": "① 퍼널 구간",
+            "제목": lo_a["step"] + " -> " + lo_b["step"] + " 구간을 점검한다",
+            "한줄": (lo_a["step"] + " 도달 " + format(lo_a["n"], ",") + "건 중 "
+                   + lo_b["step"] + " 로 넘어가는 것은 " + format(lo_b["n"], ",")
+                   + "건, " + f"{lo_b['rate'] * 100:.2f}%" + " 다. 구간 둘 중 낮은 쪽이고, "
+                   + nx_a["step"] + " -> " + nx_b["step"] + " 는 "
+                   + f"{nx_b['rate'] * 100:.2f}%" + " 로 " + f"{gap:.2f}%p" + " 높다."),
+            "규모_연간건수": round(gap / 100 * share * per_year, 1),
+            "격차_%p": round(gap, 2), "비중": round(share, 4),
+            "근거축": None, "구간": (lo_a["step"], lo_b["step"]),
+            "기각사유": None,
+            "가정_문서용": plain,
+            "가정": base + [
+                "격차 = 낮은 구간과 그다음 구간의 전환율 차",
+                "비중 = " + lo_a["step"] + " 도달 / 전체 제출",
+                "⚠ 단계가 셋이라 구간이 둘뿐이다. 비교가 한 쌍만 나온다"],
+        })
+
+    # ── ② 분해 축 ─────────────────────────────────────────────────
+    #   격차 = 최고 칸과 최저 칸의 전환율 차
+    #   비중 = **낮은 쪽 칸**의 비중 (손을 쓸 수 있는 쪽이 전체의 얼마인가)
+    #   ⚠ 키는 합성 컬럼 이름, 실측 컬럼은 "real" 값이다. 이름이 다르다.
+    seg_from, seg_to = C.FUNNEL_STEPS[1], C.FUNNEL_STEPS[2]
+    for key, spec in C.FUNNEL_DIMS.items():
+        cells = _real_dim_cells(t, spec["real"])
+        shown = [c for c in cells if c["사유"] is None]
+        hidden = [c for c in cells if c["사유"] is not None]
+        if len(shown) < 2:
+            # 비교 자체가 안 된다 — **기각이 아니라 후보를 안 만든다**
+            continue
+        hi = max(shown, key=lambda c: c["전환율"])
+        lo = min(shown, key=lambda c: c["전환율"])
+        gap = _gap_pp(hi["전환율"], lo["전환율"])
+        rejected = gap < C.MIN_GAP * 100
+        out.append({
+            "키": "dim_" + key,
+            "갈래": "② 분해 축",
+            "제목": spec["label"] + " 로 갈리는지 본다",
+            "한줄": (seg_to + " 도달률이 " + lo["칸"] + " " + f"{lo['전환율'] * 100:.2f}%"
+                   + " (" + format(lo["전환"], ",") + "/" + format(lo["도달"], ",") + "), "
+                   + hi["칸"] + " " + f"{hi['전환율'] * 100:.2f}%"
+                   + " (" + format(hi["전환"], ",") + "/" + format(hi["도달"], ",")
+                   + ") 로 " + f"{gap:.2f}%p" + " 벌어진다. 낮은 쪽이 "
+                   + seg_from + " 도달의 " + f"{lo['비중'] * 100:.2f}%" + " 다."),
+            "규모_연간건수": round(gap / 100 * lo["비중"] * per_year, 1),
+            "격차_%p": round(gap, 2), "비중": round(lo["비중"], 4),
+            "근거축": key, "구간": (seg_from, seg_to),
+            # ⚠ **코드 상수 이름을 사유에 넣지 않는다.** 문서로 그대로 실려 나가
+            #   읽는 사람이 뜻을 모르는 말이 된다. 수치만 남긴다. (2026-09-10)
+            "기각사유": (f"격차 {gap:.2f}%p 로 "
+                     f"{C.words('판정어', '격차기준')} {C.MIN_GAP * 100:.0f}%p 에 미달"
+                     if rejected else None),
+            "가정_문서용": plain,
+            "가정": base + [
+                "격차 = 최고 칸과 최저 칸의 전환율 차",
+                "비중 = 낮은 쪽 칸(" + lo["칸"] + ") 의 " + seg_from + " 도달 비중",
+                "실측 컬럼 " + spec["real"] + " (화면의 합성 컬럼 " + key + " 와 이름이 다르다)",
+            ] + (["못 믿을 칸 " + str(len(hidden)) + "개는 비교에서 뺐다: "
+                  + " / ".join(c["칸"] + " " + c["사유"] for c in hidden)] if hidden else []),
+        })
+
+    # ── ③ 임계값 ──────────────────────────────────────────────────
+    #   ⚠ config.THRESHOLDS 에 **있는 지표만** 본다. 임계값이 없는 지표의 ok 는
+    #     "괜찮다"가 아니라 "임계값 미정"이라 후보로 세지 않는다.
+    k = kpis(t)
+    for name, th in C.THRESHOLDS.items():
+        if name not in k:
+            continue
+        val = k[name]["value"]
+        st_ = status_of(name, val)
+        if st_ == "ok":
+            continue                       # 벗어나지 않았다 — 후보가 아니다
+        line = th["위험"] if st_ == "block" else th["경고"]
+        gap = abs(val - line)
+        out.append({
+            "키": "th_" + name,
+            "갈래": "③ 임계값",
+            "제목": name + " 가 정해둔 선을 벗어났다",
+            "한줄": (name + " 가 " + f"{val:.2f}" + k[name]["unit"] + " 로 "
+                   + ("위험선" if st_ == "block" else "경고선") + " "
+                   + f"{line:g}" + " 를 " + f"{gap:.2f}" + " 만큼 벗어났다 (표본 "
+                   + format(k[name]["n"], ",") + ")."),
+            "규모_연간건수": round(gap / 100 * per_year, 1),
+            "격차_%p": round(gap, 2), "비중": 1.0,
+            "근거축": None, "구간": None, "기각사유": None,
+            "가정_문서용": plain,
+            "가정": base + ["격차 = 현재값과 벗어난 선의 차", "비중 = 1 (전체 지표)"],
+        })
+
+    # ── ④ 추세 ────────────────────────────────────────────────────
+    #   monthly() 는 이름과 달리 **종결연도별**이다. 월로 자르면 표본이 없다.
+    #   완결된 두 해만 비교한다 — 마지막 해는 반쪽이라 뺀다.
+    m = monthly(t)
+    last_full = str(pd.Timestamp(C.PERIOD[1]).year - 1)     # 반쪽 해를 뺀 마지막 완결 해
+    yrs_idx = [i for i in m.index if i <= last_full]
+    if len(yrs_idx) >= 2:
+        cur_y, prev_y = yrs_idx[-1], yrs_idx[-2]
+        for name in C.THRESHOLDS:
+            if name not in m.columns:
+                continue
+            cur, prev = m.loc[cur_y, name], m.loc[prev_y, name]
+            if pd.isna(cur) or pd.isna(prev):
+                continue                   # 값이 없다 — 비교 자체가 안 된다
+            worse_up = bool(C.THRESHOLDS[name].get("높을수록_나쁨"))
+            delta = cur - prev
+            got_worse = (delta > 0) if worse_up else (delta < 0)
+            gap = abs(delta)
+            out.append({
+                "키": "trend_" + name,
+                "갈래": "④ 추세",
+                "제목": name + " 의 연도별 움직임을 본다",
+                "한줄": (name + " 가 " + prev_y + "년 " + f"{prev:.2f}" + " 에서 "
+                       + cur_y + "년 " + f"{cur:.2f}" + " 로 " + f"{delta:+.2f}"
+                       + " 움직였다 (종결연도 기준, 연 단위)."),
+                # ⚠ 나빠지지 않았으면 **규모를 재지 않는다.** 0 으로 두면 "작다"로
+                #   읽히는데, 실제로는 "얼마짜리 문제인가"라는 질문이 성립하지 않는 것이다.
+                "규모_연간건수": round(gap / 100 * per_year, 1) if got_worse else None,
+                "격차_%p": round(gap, 2), "비중": 1.0,
+                "근거축": None, "구간": None,
+                "기각사유": (None if got_worse else
+                          f"직전 해보다 나빠지지 않았다 ({delta:+.2f})"),
+                "가정_문서용": plain,
+                "가정": base + [
+                    "월이 아니라 **연** 단위다. monthly() 가 종결연도별이라서다",
+                    f"완결된 두 해만 비교했다 ({prev_y} vs {cur_y}). "
+                    f"{pd.Timestamp(C.PERIOD[1]).year}년은 반쪽이라 뺐다",
+                    "격차 = 두 해의 차", "비중 = 1 (전체 지표)"],
+            })
+
+    # 규모 큰 순, 기각된 것은 맨 뒤 — **순서를 대신 정해주는 것이 아니라 정렬만 한다**
+    #   규모가 None 인 것(재지 않은 것)은 그 안에서도 맨 뒤로.
+    out.sort(key=lambda c: (c["기각사유"] is not None,
+                            c["규모_연간건수"] is None,
+                            -(c["규모_연간건수"] or 0)))
+    return out
+
+
+# ── 주제 하나에 딸린 근거 ─────────────────────────────────────────
+#
+# ★ Day3(9주차) 실습 A 프롬프트 2.
+#
+# **이 함수는 조회만 한다. 문장을 만들지 않는다.** 문장은 report/proposal.py 가 만든다.
+# 여기서 문장을 만들면 같은 사실이 두 곳에서 다르게 쓰이기 시작한다.
+#
+# ⚠ **실측과 환산을 같은 항목에 섞지 않는다.** 절마다 "출처" 를 달아 둔다 —
+#   현황 · 원인 · 추세는 실측이고, 규모만 환산이다. 합치면 추정이 실측처럼 읽힌다.
+
+#: 주제 갈래가 ①·② 일 때 추세로 보여줄 지표. 그 구간의 **결과**에 해당하는 것.
+_TREND_DEFAULT = "최종 승인율"
+
+
+def _trend_years(t: dict, name: str) -> tuple[list[dict] | None, str | None]:
+    """지표 하나의 **연도별** 값. 없으면 (None, 사유).
+
+    ⚠ monthly() 는 이름과 달리 종결연도별이다. "최근 12개월"은 이 도메인에 없다.
+    ⚠ 마지막 해는 반쪽이다 — **빼지 않고 싣되 반쪽이라고 표시한다.** 비교에는 쓰지 않는다.
+    """
+    m = monthly(t)
+    if name not in m.columns:
+        return None, f"'{name}' 은 연도별 표에 없는 지표다"
+    col = m[name].dropna()
+    if col.empty:
+        return None, f"'{name}' 은 연도별 값이 모두 비어 있다"
+
+    half = str(pd.Timestamp(C.PERIOD[1]).year)
+    rows = [{"연도": str(y), "값": round(float(v), 2),
+             "반쪽": str(y) == half} for y, v in col.items()]
+    note = None
+    missing = [str(y) for y in m.index if pd.isna(m.loc[y, name])]
+    if missing:
+        note = (f"값이 없는 해 {len(missing)}개: {missing[0]}~{missing[-1]} "
+                f"(접수일이 없어 계산되지 않는다)")
+    return rows, note
+
+
+@st.cache_data(show_spinner=False)
+def topic_evidence(t: dict, topic: dict) -> dict:
+    """주제 하나가 쓸 근거를 한 번에 모은다. **조회만 한다.**
+
+    ★ Day3 실습 A 프롬프트 2.
+
+    반환: {"주제", "현황", "원인", "규모", "추세"}
+      현황  실측 퍼널 전체 (단계 · 도달 · 전환율 · 병목)
+      원인  분해 축 표. **주제 갈래마다 다르다** — 아래 참조
+      규모  연간 건수 + 가정. **topic 이 이미 가진 것을 그대로 싣는다**
+      추세  관련 지표의 연도별 값
+
+    없는 것은 지어내지 않고 None 으로 두되 **사유를 함께** 넣는다.
+    None 만 있고 사유가 없으면 다음 사람이 버그인 줄 안다.
+
+    원인 절이 갈래마다 다른 이유 — 이 도메인엔 축이 둘뿐이고, 주제 갈래에 따라
+    축이 있기도 없기도 하다.
+
+        ② 분해 축 주제    topic["근거축"] 그 축 하나
+        ① 퍼널 구간 주제  근거축이 없다. 그 구간을 FUNNEL_DIMS 축 전부로 쪼갠다
+        ③ 임계값 · ④ 추세  분해 축이 없다 -> None + 사유
+    """
+    갈래 = str(topic.get("갈래", ""))
+
+    # ── 현황 — 실측 퍼널 (항상 셀 수 있다) ────────────────────────
+    f = _real_funnel(t)
+    rates = [(i, s["rate"]) for i, s in enumerate(f) if s["rate"] is not None]
+    bi = min(rates, key=lambda x: x[1])[0] if rates else None
+    현황 = {
+        "출처": "실측",
+        "단계": [{"단계": s["step"], "도달": s["n"],
+                "전환율": None if s["rate"] is None else round(s["rate"] * 100, 2),
+                "병목": (i == bi)} for i, s in enumerate(f)],
+        "병목구간": (f[bi - 1]["step"], f[bi]["step"]) if bi else None,
+        "사유": None,
+    }
+
+    # ── 원인 — 분해 축 표 (갈래마다 다르다) ───────────────────────
+    seg_from, seg_to = C.FUNNEL_STEPS[1], C.FUNNEL_STEPS[2]
+    if 갈래.startswith("②") and topic.get("근거축"):
+        dims = [topic["근거축"]]
+    elif 갈래.startswith("①"):
+        dims = list(C.FUNNEL_DIMS)          # 축이 둘뿐이라 전부 준다
+    else:
+        dims = []
+
+    if not dims:
+        원인 = {"출처": "실측", "축": None,
+              "사유": f"{갈래} 주제에는 분해 축이 없다 — "
+                    f"지표 하나를 보는 갈래라 쪼갤 칸이 없다"}
+    else:
+        축들 = []
+        for key in dims:
+            spec = C.FUNNEL_DIMS[key]
+            cells = _real_dim_cells(t, spec["real"])   # 실측 컬럼은 "real" 값
+            shown = [c for c in cells if c["사유"] is None]
+            hi = max(shown, key=lambda c: c["전환율"]) if shown else None
+            lo = min(shown, key=lambda c: c["전환율"]) if shown else None
+            축들.append({
+                "축": key, "이름": spec["label"], "실측컬럼": spec["real"],
+                "구간": (seg_from, seg_to),
+                "칸": [{"칸": c["칸"], "도달": c["도달"], "전환": c["전환"],
+                       "전환율": None if c["전환율"] is None else round(c["전환율"] * 100, 2),
+                       "비중": None if c["비중"] is None else round(c["비중"] * 100, 2),
+                       "최고": bool(hi and c["칸"] == hi["칸"]),
+                       "최저": bool(lo and c["칸"] == lo["칸"]),
+                       "사유": c["사유"]} for c in cells],
+                "격차_%p": _gap_pp(hi["전환율"], lo["전환율"]) if (hi and lo) else None,
+                "감춘칸": [c["칸"] + " " + c["사유"] for c in cells if c["사유"]],
+            })
+        원인 = {"출처": "실측", "축": 축들, "사유": None}
+
+    # ── 규모 — **환산이다.** topic 이 이미 가진 것을 그대로 싣는다 ──
+    #   여기서 다시 계산하면 두 곳에서 갈라진다.
+    size = topic.get("규모_연간건수")
+    규모 = {
+        "출처": "환산",
+        "연간건수": size,
+        "격차_%p": topic.get("격차_%p"),
+        "비중": topic.get("비중"),
+        "가정": list(topic.get("가정") or []),
+        # ⚠ 문서에 나가는 것은 이쪽이다. 위 "가정" 은 계산 근거라 코드 용어가 들어 있다.
+        "가정_문서용": topic.get("가정_문서용"),
+        "사유": (None if size is not None else
+                "나빠진 방향이 아니라 규모를 재지 않았다 — "
+                "0 이 아니라 '질문이 성립하지 않음' 이다"),
+    }
+
+    # ── 추세 — 연도별 (월이 아니다) ───────────────────────────────
+    if 갈래.startswith("③") or 갈래.startswith("④"):
+        target = topic["키"].split("_", 1)[1]      # th_<지표> / trend_<지표>
+    else:
+        target = _TREND_DEFAULT
+    rows, note = _trend_years(t, target)
+    추세 = {
+        "출처": "실측", "지표": target, "단위": "연 (종결연도)",
+        "연도별": rows,
+        "사유": (note if rows else
+                f"'{target}' 의 연도별 값을 낼 수 없다 — {note}"),
+    }
+
+    return {
+        "주제": {k: topic.get(k) for k in
+               ("키", "갈래", "제목", "한줄", "근거축", "구간", "기각사유")},
+        "현황": 현황, "원인": 원인, "규모": 규모, "추세": 추세,
+    }

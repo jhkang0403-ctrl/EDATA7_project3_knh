@@ -176,10 +176,11 @@ def _tab_acquisition():
                 f"{prev.n:,} 중 {bn.n:,}만 넘어가 "
                 f"<b>{(1 - bn.step_rate) * 100:.1f}%가 이탈</b>합니다.")
         with right:
-            # ★ Day3 실습 A — 분해 축. cases_synthetic 의 실제 컬럼.
+            # ★ 분해 축은 **config 가 원본이다.** 여기서 새로 정하지 않는다.
+            #   (9주차 Day3 에 화면 두 곳에 흩어져 있던 것을 config 로 올렸다)
             #   손 쓸 수 있는 축으로 고른다 — 숙주 식별은 제출 서류 완성도의 프록시,
             #   국가는 못 바꾸는 축(격차도 거의 없어 "안 갈린다"를 확인하는 용도).
-            DIMS = {"host_identified": "숙주 식별", "country": "국가"}
+            DIMS = {k: v["label"] for k, v in C.FUNNEL_DIMS.items()}
 
             # URL 쿼리 파라미터(?axis=)와 연결. 없거나 이상한 값이면 첫 후보로 떨어진다.
             _fallback = next(iter(DIMS))

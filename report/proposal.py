@@ -362,7 +362,9 @@ def _s_apply(human: dict) -> dict:
 
 
 # ── 조립 ──────────────────────────────────────────────────────────
-def build(cards: dict, human: dict | None = None) -> list[dict]:
+def build_cards(cards: dict, human: dict | None = None) -> list[dict]:
+    # ⚠ Day2 조립기. Day3 에서 build() 가 주제를 받는 구조로 바뀌어 이름을 옮겼다.
+    #   리포트 페이지의 제안서(임시) 탭이 아직 이것을 부른다 — 실습 E 에서 정리한다.
     """제안서 7절을 조립한다.
 
     cards  parse_cards() 가 돌려준 딕셔너리
@@ -519,7 +521,8 @@ def _summary_html(sec: dict, cards: list[dict]) -> str:
     return "".join(out)
 
 
-def to_html(secs: list[dict]) -> str:
+def to_html_cards(secs: list[dict]) -> str:
+    # ⚠ Day2 절 모양({title,kind,body})을 받는다. Day3 절은 to_html() 이 받는다.
     """제안서를 **단일 HTML 파일**로. 템플릿의 구조와 클래스를 그대로 쓴다.
 
     ★ Day2 실습 E 프롬프트 8.
@@ -690,10 +693,13 @@ def missing_glyphs(secs: list[dict]) -> list[str]:
     cmap = _font_cmap()
     if not cmap:
         return []
+    # ⚠ Day2 절({title,body})과 Day3 절({제목,질문,문장})을 **둘 다** 읽는다.
+    #   한쪽만 읽으면 새 문서의 글자를 훑지 않고 "통과"라고 말한다.
     bag = []
     for s in secs:
-        bag.append(s.get("title", ""))
-        bag.append(s.get("body", ""))
+        bag += [s.get("title", ""), s.get("body", ""),
+                s.get("제목", ""), s.get("질문", "")]
+        bag += list(s.get("문장") or [])
         for e in (s.get("candidates") or []):
             bag.append(e.get("head", ""))
             bag += e.get("items", [])
@@ -706,7 +712,8 @@ def missing_glyphs(secs: list[dict]) -> list[str]:
     return [f"{ch} (U+{ord(ch):04X}) x{n}" for ch, n in seen.items()]
 
 
-def build_pdf(secs: list[dict], title: str = "제안서") -> bytes:
+def build_pdf_cards(secs: list[dict], title: str = "제안서") -> bytes:
+    # ⚠ Day2 절 모양을 받는다. Day3 절은 build_pdf() 가 받는다.
     """제안서를 PDF 로. to_pdf.Report 를 그대로 쓴다.
 
     ★ Day2 실습 E 프롬프트 9.
@@ -806,5 +813,673 @@ def build_pdf(secs: list[dict], title: str = "제안서") -> bytes:
             pdf.set_x(pdf.l_margin)
             pdf.multi_cell(0, 6.2, pdf_safe(para.strip()))
             pdf.ln(3)
+
+    return bytes(pdf.output())
+
+
+# ── Day3 조립기 — 주제 하나로 6절을 만든다 ────────────────────────
+#
+# ★ Day3(9주차) 실습 D 프롬프트 5.
+#
+# Day2 의 build_cards() 와 **다른 문서다.** 읽는 사람이 다르다 —
+# 저건 카드를 절로 옮긴 것이고, 이것은 **결정을 요청하는 문서**다.
+# 읽고 나서 승인 / 조건부 승인 / 보류 중 하나가 나와야 한다.
+#
+# 이 파일이 지키는 것:
+#
+#   1. **절 목록과 제목을 여기 박지 않는다.** config.PROPOSAL_SECTIONS ·
+#      config.PROPOSAL_WORDS 가 원본이다
+#   2. **계산하지 않는다.** evidence 와 cards 에 있는 것을 옮기기만 한다 —
+#      여기서 다시 계산하면 metrics 와 갈라진다
+#   3. **근거가 없으면 그 절을 아예 만들지 않는다.** 빈 절을 만들어 채우지 않는다
+#   4. **사람이 쓰는 두 절은 근거가 없어도 항상 만든다.** 자동 절이 줄어도 남는다 —
+#      하나도 없으면 책임질 사람이 없는 문서가 된다
+#
+# ⚠ 이 도메인에서 3번이 실제로 걸린다 — ④ 추세 주제는 원인·규모가 None 이라
+#   절이 6개에서 **4개로 준다.** 그것이 정상이다. (Day3 부록 C)
+
+from viz import proposal_charts as PCH
+
+
+#: 한 절의 문장 상한. **넘으면 분석 문서로 돌아간 것이다.**
+MAX_LINES = 3
+
+
+def _josa(word: str, pair: str) -> str:
+    """받침을 보고 조사를 고른다.
+
+    칸 이름·축 이름이 데이터에서 오므로 조사를 하드코딩할 수 없다 —
+    "숙주 식별으로"(X) / "국가으로"(X) 같은 문장이 그대로 인쇄된다.
+
+    pair 는 **받침있음 + 받침없음** 순서: "은는" · "이가" · "을를" · "과와".
+    "로" 는 특수 — 받침이 없거나 ㄹ 이면 "로", 아니면 "으로".
+    """
+    ch = (word or "").strip()
+    ch = ch[-1] if ch else ""
+    if not ("가" <= ch <= "힣"):
+        jong = 0                                  # 숫자·영문은 받침 없는 것으로 본다
+    else:
+        jong = (ord(ch) - 0xAC00) % 28
+    if pair == "로":
+        return "로" if jong in (0, 8) else "으로"   # 받침 없거나 ㄹ이면 "로"
+    # pair 는 "받침있음+받침없음" 순서다 — 은는 · 이가 · 을를 · 과와
+    return pair[0] if jong else pair[1]
+
+
+def _pp(v) -> str:
+    """격차 표기. **소수 둘째 자리로 맞춘다** — 발견.md·카드와 자릿수를 맞춰
+    읽는 사람이 직접 빼볼 수 있게 한다."""
+    return "—" if v is None else f"{float(v):.2f}"
+
+
+def _seg(a: str, b: str) -> str:
+    """구간은 "A -> B" 로 적는다. 도착 단계만 쓰면 무엇에서 무엇으로 가는
+    비율인지 사라진다."""
+    return f"{C.FUNNEL_LABELS.get(a, a)} -> {C.FUNNEL_LABELS.get(b, b)}"
+
+
+def _has(ev: dict | None) -> bool:
+    """이 근거 항목에 실을 것이 있는가. **None 과 빈 것을 같게 본다.**"""
+    if not ev:
+        return False
+    return bool(ev.get("단계") or ev.get("축") or ev.get("연도별")
+                or ev.get("연간건수") is not None)
+
+
+def _sec(key: str, kind: str, 문장: list[str],
+         차트: list[str] | None = None, 표: dict | None = None,
+         제목키: str | None = None) -> dict:
+    """절 하나. 제목·질문은 **config 에서만** 온다.
+
+    ⚠ 한 절은 MAX_LINES 문장을 넘지 않는다. 넘으면 분석 문서로 돌아간 것이다.
+    ⚠ 자동으로 쓴 문장에 **인과 단정 표현 검사**를 건다 — 새로 만들지 않고
+      report.sections 것을 그대로 쓴다. 사람이 쓴 절에는 걸지 않는다
+      (사람 문장 때문에 문서 조립이 실패하면 안 된다 — Day3 프롬프트 10).
+    """
+    tk = 제목키 or key
+    lines = [x for x in 문장 if x][:MAX_LINES]
+    sec = {"키": key, "제목": C.words("절제목", tk), "질문": C.words("질문", tk),
+           "kind": kind, "문장": lines,
+           "차트": [c for c in (차트 or []) if c], "표": 표}
+    if kind == "auto":
+        bad = check_phrasing(" ".join(lines))
+        sec["문장검사"] = bad or None
+    return sec
+
+
+# ── 자동 절 ───────────────────────────────────────────────────────
+def _s_현황(ev: dict, topic: dict) -> dict | None:
+    s = ev.get("현황")
+    if not _has(s):
+        return None
+    steps = s["단계"]
+    seg = s.get("병목구간")
+    bn = next((x for x in steps if x.get("병목")), None)
+    prev = None
+    if bn:
+        i = steps.index(bn)
+        prev = steps[i - 1] if i else None
+
+    문장 = []
+    if bn and prev:
+        lb_prev = C.FUNNEL_LABELS.get(prev["단계"], prev["단계"])
+        lb_bn = C.FUNNEL_LABELS.get(bn["단계"], bn["단계"])
+        문장.append(f"{lb_prev}에 이른 {prev['도달']:,}건 중 "
+                    f"{lb_bn}에 이르는 것은 {bn['도달']:,}건, {_pp(bn['전환율'])}%입니다.")
+        # 비교 대상 — 어느 구간과 견줘서 낮은지. 구간 이름을 "A -> B" 로 적는다.
+        others = []
+        for i, x in enumerate(steps):
+            if x.get("전환율") is None or x is bn or not i:
+                continue
+            others.append((steps[i - 1]["단계"], x["단계"], x["전환율"]))
+        if others:
+            fa, fb, rate = max(others, key=lambda o: o[2])
+            문장.append(f"같은 흐름의 {_seg(fa, fb)} 구간은 {_pp(rate)}%로, "
+                        f"{_seg(prev['단계'], bn['단계'])} 구간이 "
+                        f"둘 중 낮은 쪽입니다.")
+    return _sec("현황", "auto", 문장,
+                [PCH.funnel_svg(s)],
+                {"이름": "단계별 도달", "행": steps,
+                 "병목구간": (" -> ".join(seg) if seg else None)})
+
+
+def _s_원인(ev: dict, topic: dict) -> dict | None:
+    c = ev.get("원인")
+    if not _has(c):
+        return None                      # 축이 없는 갈래 — 절을 만들지 않는다
+    축들 = c["축"]
+
+    문장, 차트 = [], []
+    for ax in 축들:
+        차트.append(PCH.gap_svg(ax))
+        shown = [k for k in ax["칸"] if k.get("전환율") is not None]
+        if len(shown) < 2:
+            continue
+        hi = max(shown, key=lambda k: k["전환율"])
+        lo = min(shown, key=lambda k: k["전환율"])
+        gap = ax.get("격차_%p")
+        nm = ax["이름"]
+        ro = _josa(nm, "로")
+        if gap is not None and gap >= C.MIN_GAP * 100:
+            문장.append(f"{nm}{ro} 나누면 {lo['칸']} {_pp(lo['전환율'])}%, "
+                        f"{hi['칸']} {_pp(hi['전환율'])}%로 {_pp(gap)}%p 벌어집니다. "
+                        f"낮은 쪽이 전체의 {_pp(lo['비중'])}%입니다.")
+        elif gap is not None:
+            # "안 갈린다"도 결과다. 지우지 않는다. 판정어는 config 에서 온다.
+            문장.append(f"{nm}{ro}는 {_pp(gap)}%p 차이에 그쳐 "
+                        f"{C.words('판정어', '안갈림')}")
+        if ax.get("감춘칸"):
+            문장.append(f"{nm}에서 {len(ax['감춘칸'])}칸은 "
+                        f"{C.words('판정어', '감춘칸')}했습니다"
+                        f"({' · '.join(ax['감춘칸'])}).")
+    return _sec("원인", "auto", 문장, 차트,
+                {"이름": "축별 전환율", "축": 축들})
+
+
+def _s_규모(ev: dict, topic: dict) -> dict | None:
+    """규모 — **규모가 없어도 추세가 있으면 만든다.** (2026-09-10 결정)
+
+    추세 주제는 나빠지지 않아 규모를 재지 않는다. 그때 이 절을 통째로 빼면
+    **추세 주제인데 추세 그림이 없는 문서**가 된다. 대신 제목을 바꾼다 —
+    "연 몇 건입니까" 라고 물어놓고 건수가 없으면 제목이 거짓이 된다.
+    """
+    z = ev.get("규모") or {}
+    tr = ev.get("추세") or {}
+    has_size = z.get("연간건수") is not None
+    has_trend = _has(tr)
+    if not (has_size or has_trend):
+        return None
+
+    문장 = []
+    if has_size:
+        # ⚠ 실측 문장과 환산 문장을 한 문장에 합치지 않는다. 합치면 추정이 실측처럼 읽힌다.
+        문장.append(f"이 격차가 유지된다고 보면 연 {z['연간건수']}건이 "
+                    f"이 구간에서 더 빠집니다.")
+        # ⚠ 계산 과정을 문서에 넣지 않는다. **가정은 남긴다** —
+        #   환산에 가정이 안 붙으면 예측을 실측처럼 쓰는 것이다.
+        plain = z.get("가정_문서용")
+        if plain:
+            문장.append("(" + plain + ")")
+    if has_trend and len(문장) < MAX_LINES:
+        rows = [r for r in tr["연도별"] if not r.get("반쪽")]
+        if len(rows) >= 2:
+            a, b = rows[-2], rows[-1]
+            문장.append(f"{tr['지표']}{_josa(tr['지표'], '은는')} "
+                        f"{a['연도']}년 {_pp(a['값'])}에서 {b['연도']}년 {_pp(b['값'])}로 "
+                        f"움직였습니다 (연 단위, 완결된 해만).")
+
+    return _sec("규모", "auto", 문장,
+                [PCH.trend_svg(tr)] if has_trend else [],
+                {"이름": "환산" if has_size else "추세",
+                 "연간건수": z.get("연간건수"), "가정": z.get("가정") or []},
+                제목키=None if has_size else "규모_추세만")
+
+
+def _s_제안(cards: dict, topic: dict) -> dict | None:
+    cl = (cards or {}).get("cards") or []
+    if not cl:
+        return None
+    문장 = []
+    for cls in CLASSES:
+        picked = [c for c in cl if c.get("분류") == cls]
+        if picked:
+            문장.append(f"{C.words('분류어', cls)} {len(picked)}건 — "
+                        + " / ".join(c["title"] for c in picked))
+    return _sec("제안", "auto", 문장, [], {"이름": "제안 카드", "카드": cl})
+
+
+# ── 사람이 쓰는 절 — **근거가 없어도 항상 만든다** ────────────────
+#: 요청 문장에 이 중 하나가 없으면 그것은 보고이지 제안이 아니다.
+DECIDE_VERBS = ("승인", "결정", "판단")
+
+
+def has_decide_verb(text: str) -> bool:
+    """요청 문장에 **결정을 요구하는 동사**가 있는가.
+
+    없으면 화면에 경고를 띄운다. **저장은 막지 않는다** —
+    사람이 쓴 문장 때문에 문서 조립이 실패하면 안 된다. (Day3 프롬프트 10)
+    """
+    return any(v in (text or "") for v in DECIDE_VERBS)
+
+
+def _decision_options(cards: dict, size) -> list[dict]:
+    """결정 선택지 셋. **무엇이 따라오는지는 카드에서 온다. 지어내지 않는다.**
+
+    재료는 카드의 「되돌림」이다 — 어떻게 되돌리는지가 거기 적혀 있다.
+    (2026-09-10 사람이 고름: 되돌림 방법을 선택지마다 적는다)
+    """
+    cl = (cards or {}).get("cards") or []
+    stop = [c for c in cl if c.get("분류") == "하지 말 것"]
+    ways = []
+    for c in stop:
+        back = (c.get("되돌림") or "").strip()
+        if back.startswith("가능"):
+            # "가능 — 축 목록에서 이름 하나를 빼고 ... (코드 사실)" 에서 방법만
+            how = back.split("—", 1)[-1].split("(")[0].strip(" .")
+            if how:
+                ways.append(how)
+    n = len(stop)
+    lab = C.words("분류어", "하지 말 것")
+
+    후속 = {
+        "승인": (f"{lab} {n}건을 적용합니다."
+               + (f" 되돌리는 방법: {' · '.join(ways)}." if ways else "")
+               + " 셋 다 되돌릴 수 있습니다."),
+        "조건부 승인": f"{lab} 가운데 일부만 적용합니다. "
+                   f"어느 것을 남길지 지정해 주셔야 합니다.",
+        "보류": ("다음 회차까지 지금 상태로 둡니다."
+               + (f" 그동안 연 {size}건이 계속 빠집니다."
+                  if size is not None else
+                  " 이 주제는 규모를 재지 않아 누적을 낼 수 없습니다.")),
+    }
+    return [{"선택": k, "따라오는 것": v} for k, v in 후속.items()]
+
+
+def _s_human(key: str, human: dict, cards: dict | None = None,
+             topic: dict | None = None) -> dict:
+    title = C.words("절제목", key)
+    body = (human or {}).get(key) or (human or {}).get(title) or ""
+    sec = _sec(key, "human", [body] if body.strip() else [])
+    sec["placeholder"] = {
+        "위험": "이 판단이 무엇 때문에 틀릴 수 있는지, 그리고 "
+              "무엇이 어떻게 되면 이 제안을 접을 것인지 적으십시오.",
+        "요청": "무엇을 결정해 주셔야 하는지 적으십시오. "
+              "승인 · 결정 · 판단 중 하나가 문장에 들어가야 합니다.",
+    }.get(key, "")
+
+    if key != "요청":
+        return sec
+
+    # ── 요청 절에만 자동으로 붙는 것 셋 ──────────────────────────
+    #   문장은 사람이 쓴다. 아래는 **자동**이다.
+    t = topic or {}
+    size = t.get("규모_연간건수")
+    sec["규모"] = size
+    sec["선택지"] = _decision_options(cards or {}, size)
+    # ⚠ "다음 분기"가 아니라 **다음 1년**이다. 이 도메인은 연 단위로 센다 —
+    #   심사가 중앙 176일 걸리고 지표가 종결연도별이라 분기 숫자가 크기를 못 전한다.
+    sec["미룰때"] = (f"결정을 다음 1년까지 미루면 {size}건이 더 쌓입니다."
+                  if size is not None else
+                  "이 주제는 규모를 재지 않아 누적을 낼 수 없습니다.")
+    # ⚠ 모르는 것을 낱말 하나로 두지 않는다 — 셋이 갖춰져야 구멍이 아니라 요청이 된다.
+    #   [무엇을 모르는가]는 카드에 있고, [누가 확인하는가]는 사람이 정했다.
+    unknown = []
+    for c in ((cards or {}).get("cards") or []):
+        for field in ("비용", "효과"):
+            v = (c.get(field) or "").strip()
+            if not is_todo(v):
+                continue
+            what = v.split("—", 1)[-1].strip() if "—" in v else field
+            unknown.append({
+                "무엇": f"{c['title']} 의 {field} — {what}",
+                "누가": "분석 담당자가 다음 회차에 직접 산정합니다",
+                "모르는채로": "되돌릴 수 있으므로 "
+                          f"{C.words('분류어', '하지 말 것')} 결정은 지금 내릴 수 있습니다",
+            })
+    sec["확인필요"] = unknown
+    return sec
+
+
+# ── 조립 ──────────────────────────────────────────────────────────
+def build(topic: dict, evidence: dict, cards: dict | None = None,
+          human: dict | None = None) -> list[dict]:
+    """주제 하나로 절 목록을 만든다.
+
+    ★ Day3 실습 D 프롬프트 5.
+
+    topic     proposal_topics() 후보 하나
+    evidence  topic_evidence(t, topic) 결과
+    cards     parse_cards() 결과 (4절이 쓴다)
+    human     사람이 쓴 절의 본문 {절 키 또는 제목: 본문}
+
+    **순서와 자동/사람 구분은 config.PROPOSAL_SECTIONS 가 정한다.** 여기서 바꾸지 않는다.
+    근거가 없는 자동 절은 **만들지 않는다** — 빈 절을 만들어 채우면 그 자리가
+    그대로 인쇄된다. 사람이 쓰는 두 절은 근거와 무관하게 항상 만든다.
+    """
+    human = human or {}
+    out = []
+    for key, kind, _ev_key in C.PROPOSAL_SECTIONS:
+        if kind == "human":
+            out.append(_s_human(key, human, cards or {}, topic))
+            continue
+        sec = {"현황": lambda: _s_현황(evidence, topic),
+               "원인": lambda: _s_원인(evidence, topic),
+               "규모": lambda: _s_규모(evidence, topic),
+               "제안": lambda: _s_제안(cards or {}, topic)}[key]()
+        if sec:
+            out.append(sec)
+    return out
+
+
+# ── Day3 내보내기 ─────────────────────────────────────────────────
+#
+# ⚠ Day2 의 to_html_cards()·build_pdf_cards() 와 **절의 모양이 다르다.**
+#     Day2  {"title", "kind", "body", ...}
+#     Day3  {"키", "제목", "질문", "kind", "문장", "차트", "표"}
+#   같은 이름으로 두면 조용히 빈 문서가 나온다. 이름을 갈랐다.
+#
+# ★ 여기 to_html() 은 **뼈대만**이다. A4 인쇄 디자인은 프롬프트 8 에서 짠다.
+
+def _sec_text(sec: dict) -> str:
+    """절 하나의 글자만 뽑는다. 폰트 검사·문장 검사가 같은 것을 본다."""
+    parts = [sec.get("제목") or sec.get("title") or "",
+             sec.get("질문") or ""]
+    parts += list(sec.get("문장") or [])
+    b = sec.get("body")
+    if b:
+        parts.append(b)
+    return " ".join(str(x) for x in parts if x)
+
+
+# ── A4 인쇄용 스타일 ──────────────────────────────────────────────
+#
+# ★ Day3 실습 E 프롬프트 8. **템플릿 파일을 읽지 않는다. 이 함수가 직접 만든다.**
+#
+# 색은 넷까지 — 먹색 본문 · 회색 보조 · 강조 1 · 위험 1.
+# 다섯째 색이 생기면 강조가 강조가 아니게 된다.
+#
+# 웹폰트·CDN·외부 이미지를 쓰지 않는다. **파일 하나로 열려야 한다** —
+# 인터넷이 없어도, 파일만 건네받아도 같아야 한다.
+
+_A4_CSS = """
+@page{size:A4;margin:18mm 16mm}
+:root{--ink:@INK@;--muted:@MUTED@;--accent:@ACCENT@;--risk:@RISK@;--line:@LINE@}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:'Malgun Gothic','Apple SD Gothic Neo',system-ui,sans-serif;
+     color:var(--ink);font-size:10.5pt;line-height:1.7;background:#fff}
+.page{max-width:186mm;margin:0 auto;padding:10mm 0 16mm}
+
+/* 제목 위계는 3단까지만 */
+h1{font-size:20pt;font-weight:800;margin:0 0 4px;line-height:1.3}
+h2{font-size:13pt;font-weight:700;margin:22px 0 1px;page-break-after:avoid}
+h3{font-size:11pt;font-weight:700;margin:14px 0 4px;page-break-after:avoid}
+.lead{font-size:10pt;color:var(--muted);margin:0 0 4px}
+.q{font-size:8.8pt;color:var(--muted);margin:0 0 8px}
+.meta{font-size:8.5pt;color:var(--muted);border-top:1px solid var(--line);
+      padding-top:6px;margin-top:4px}
+p{margin:5px 0}
+
+/* 숫자 — tabular-nums 로 굵게, 단위는 한 단계 작게 */
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum";font-weight:700}
+.unit{font-size:0.88em;font-weight:400;color:var(--muted)}
+
+/* 한 장 요약 — 문서 맨 앞 박스 하나 */
+.summary{border:1px solid var(--line);border-top:3px solid var(--accent);
+         border-radius:6px;padding:12px 16px;margin:14px 0 6px;
+         page-break-inside:avoid}
+.summary h2{font-size:9pt;font-weight:700;color:var(--accent);margin:0 0 8px;
+            letter-spacing:.06em}
+.srow{display:flex;gap:12px;padding:5px 0;border-top:1px solid var(--line)}
+.srow:first-of-type{border-top:none;padding-top:0}
+.srow .k{flex:0 0 46px;font-size:8.5pt;font-weight:700;color:var(--muted);
+         padding-top:2px}
+.srow .v{flex:1}
+
+/* 표 — 가로선만. 세로선 금지. 머리행만 옅은 배경 */
+table{border-collapse:collapse;width:100%;font-size:9pt;margin:8px 0 10px;
+      page-break-inside:avoid}
+th,td{border:none;border-bottom:1px solid var(--line);padding:5px 8px;
+      text-align:left;vertical-align:top}
+thead th{background:#f8fafc;border-bottom:1.5px solid var(--line);
+         font-weight:700;font-size:8.5pt;color:var(--muted)}
+td.r,th.r{text-align:right}
+tr.hl td{font-weight:700}
+tr.dim td{color:var(--muted)}
+
+.todo{color:var(--risk);font-weight:700}
+.note{font-size:8.8pt;color:var(--muted);margin:4px 0}
+figure{margin:8px 0 12px;page-break-inside:avoid}
+svg{max-width:100%}
+@media print{.page{padding:0}}
+"""
+
+
+def _a4_css() -> str:
+    css = _A4_CSS
+    for k, v in (("@INK@", C.BRAND["ink"]), ("@MUTED@", C.BRAND["muted"]),
+                 ("@ACCENT@", C.BRAND["primary"]), ("@RISK@", C.COLORS["block"]),
+                 ("@LINE@", C.BRAND["line"])):
+        css = css.replace(k, v)
+    return css
+
+
+_N_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)(%p|%|건|년|일)?")
+
+
+def _nums(text) -> str:
+    """숫자에 tabular-nums 굵게, 단위는 한 단계 작게. escape 뒤에 돌린다."""
+    def sub(m):
+        out = '<span class="num">' + m.group(1) + "</span>"
+        if m.group(2):
+            out += '<span class="unit">' + m.group(2) + "</span>"
+        return out
+    return _N_RE.sub(sub, _esc(text))
+
+
+def _summary_rows(secs: list[dict], topic: dict) -> list[tuple[str, str]]:
+    """한 장 요약 — **절 순서와 같게.** 절이 없으면 그 줄도 없다.
+
+    build() 가 요약 절을 만들지 않는다. 여기서 절에서 뽑아 만든다.
+    (Day3 판단 기준 1: 한 장 요약은 본문 여섯을 압축한 것. 순서가 같아야 한다)
+    """
+    by = {s["키"]: s for s in secs}
+    rows = []
+    for key, label in (("현황", "현황"), ("원인", "원인"),
+                       ("규모", "규모"), ("요청", "요청")):
+        sec = by.get(key)
+        if not sec:
+            continue                      # 절이 없으면 요약 줄도 없다
+        lines = sec.get("문장") or []
+        if key == "요청" and not lines:
+            rows.append((label, '<span class="todo">[작성되지 않음 — 사람이 씁니다]</span>'))
+            continue
+        if not lines:
+            continue
+        rows.append((label, _nums(lines[0])))
+    return rows
+
+
+def _table_html(sec: dict) -> str:
+    """절의 표. **가로선만.** 컬럼 이름이 아니라 라벨을 쓴다."""
+    tb = sec.get("표") or {}
+    name = tb.get("이름")
+
+    if name == "단계별 도달":
+        rows = tb.get("행") or []
+        out = ["<table><thead><tr><th>단계</th><th class='r'>도달</th>"
+               "<th class='r'>전 단계 대비</th></tr></thead><tbody>"]
+        for r in rows:
+            cls = ' class="hl"' if r.get("병목") else ""
+            rate = "—" if r.get("전환율") is None else f"{r['전환율']}%"
+            out.append(f"<tr{cls}><td>{_esc(C.FUNNEL_LABELS.get(r['단계'], r['단계']))}"
+                       f"</td><td class='r'>{_nums(format(r['도달'], ','))}</td>"
+                       f"<td class='r'>{_nums(rate)}</td></tr>")
+        return "".join(out) + "</tbody></table>"
+
+    if name == "축별 전환율":
+        out = []
+        for ax in (tb.get("축") or []):
+            out.append(f"<h3>{_esc(ax['이름'])}</h3>")
+            out.append("<table><thead><tr><th>구분</th><th class='r'>도달</th>"
+                       "<th class='r'>도달률</th><th class='r'>비중</th>"
+                       "</tr></thead><tbody>")
+            for k in ax.get("칸") or []:
+                if k.get("전환율") is None:
+                    out.append(f"<tr class='dim'><td>{_esc(k['칸'])}</td>"
+                               f"<td class='r'>{_nums(format(k['도달'], ','))}</td>"
+                               f"<td colspan='2'>{_esc(k.get('사유', ''))}</td></tr>")
+                    continue
+                cls = ' class="hl"' if (k.get("최저") or k.get("최고")) else ""
+                out.append(f"<tr{cls}><td>{_esc(k['칸'])}</td>"
+                           f"<td class='r'>{_nums(format(k['도달'], ','))}</td>"
+                           f"<td class='r'>{_nums(str(k['전환율']) + '%')}</td>"
+                           f"<td class='r'>{_nums(str(k['비중']) + '%')}</td></tr>")
+            out.append("</tbody></table>")
+        return "".join(out)
+
+    if name == "제안 카드":
+        out = ["<table><thead><tr><th>구분</th><th>무엇을</th><th>되돌림</th>"
+               "</tr></thead><tbody>"]
+        for c in tb.get("카드") or []:
+            back = c.get("되돌림") or ""
+            out.append(f"<tr><td>{_esc(C.words('분류어', c.get('분류', '')))}</td>"
+                       f"<td>{_esc(c['title'])}</td>"
+                       f"<td>{_esc(back.split('—')[0].strip() or '—')}</td></tr>")
+        return "".join(out) + "</tbody></table>"
+    return ""
+
+
+def to_html(secs: list[dict], topic: dict | None = None) -> str:
+    """제안서를 **A4 인쇄 기준 단일 HTML** 로. 템플릿 파일을 읽지 않는다.
+
+    ★ Day3 실습 E 프롬프트 8.
+
+    · 빈 절은 그리지 않는다 — 애초에 build() 가 안 만든다
+    · 웹폰트·CDN·외부 이미지를 쓰지 않는다. 파일 하나로 열린다
+    · 계산 과정·함수 이름·컬럼 이름을 문서에 넣지 않는다
+    """
+    t = topic or {}
+    title = t.get("제목") or "제안서"
+    out = ["<!DOCTYPE html>", '<html lang="ko"><head><meta charset="UTF-8">',
+           '<meta name="viewport" content="width=device-width, initial-scale=1">',
+           f"<title>{_esc(title)}</title>",
+           "<style>" + _a4_css() + "</style></head><body>", '<div class="page">']
+
+    out.append(f"<h1>{_esc(title)}</h1>")
+    if t.get("한줄"):
+        out.append(f'<p class="lead">{_nums(t["한줄"])}</p>')
+    if t.get("기각사유"):
+        out.append(f'<p class="note"><span class="todo">'
+                   f'{_esc(C.words("판정어", "기각"))}</span> — '
+                   f'{_esc(t["기각사유"])}</p>')
+    out.append(f'<div class="meta">{_esc(C.DATASET)} · '
+               f'{_esc(C.PERIOD[0])} ~ {_esc(C.PERIOD[1])}</div>')
+
+    rows = _summary_rows(secs, t)
+    if rows:
+        out.append('<div class="summary"><h2>한 장 요약</h2>')
+        for k, v in rows:
+            out.append(f'<div class="srow"><div class="k">{_esc(k)}</div>'
+                       f'<div class="v">{v}</div></div>')
+        out.append("</div>")
+
+    for sec in secs:
+        out.append(f"<h2>{_esc(sec.get('제목', ''))}</h2>")
+        if sec.get("질문"):
+            out.append(f'<p class="q">{_esc(sec["질문"])}</p>')
+        lines = sec.get("문장") or []
+        if lines:
+            for ln in lines:
+                out.append(f"<p>{_nums(ln)}</p>")
+        elif sec["kind"] == "human":
+            out.append(f'<p class="todo">[작성되지 않음] '
+                       f'{_esc(sec.get("placeholder", ""))}</p>')
+
+        # 요청 절 — 문장은 사람이 쓰고, 아래 셋은 자동이다.
+        if sec["키"] == "요청":
+            opts = sec.get("선택지") or []
+            if opts:
+                out.append("<table><thead><tr><th>결정</th><th>무엇이 따라오나"
+                           "</th></tr></thead><tbody>")
+                for o in opts:
+                    out.append(f"<tr><td>{_esc(o['선택'])}</td>"
+                               f"<td>{_nums(o['따라오는 것'])}</td></tr>")
+                out.append("</tbody></table>")
+            if sec.get("미룰때"):
+                out.append(f'<p class="note">{_nums(sec["미룰때"])}</p>')
+            uk = sec.get("확인필요") or []
+            if uk:
+                out.append(f"<h3>{_esc(C.words('확인필요', '미확인'))}</h3>")
+                out.append("<table><thead><tr><th>무엇을 모르는가</th>"
+                           "<th>누가 확인하는가</th>"
+                           "<th>모르는 채로 할 수 있는 결정</th></tr></thead><tbody>")
+                for u in uk:
+                    out.append(f"<tr><td>{_esc(u['무엇'])}</td>"
+                               f"<td>{_esc(u['누가'])}</td>"
+                               f"<td>{_esc(u['모르는채로'])}</td></tr>")
+                out.append("</tbody></table>")
+        tbl = _table_html(sec)
+        if tbl:
+            out.append(tbl)
+        for svg in (sec.get("차트") or []):
+            out.append("<figure>" + svg + "</figure>")
+
+    out.append("</div></body></html>")
+    return chr(10).join(out)
+
+
+def build_pdf(secs: list[dict], topic: dict | None = None) -> bytes:
+    """Day3 제안서를 PDF 로. to_pdf.Report 를 그대로 재사용한다.
+
+    ⚠ 차트(SVG)는 넣지 않는다 — fpdf2 가 SVG 를 직접 못 그린다.
+      그 사실을 문서에 적는다. 지어내지 않는다.
+    ⚠ 생성 시각을 넣지 않는다. 카드의 "최종 갱신" 으로 고정한다 (재현).
+    """
+    pdf = to_pdf.Report()
+    meta = parse_cards().get("meta", {})
+    stamp = str(meta.get("최종 갱신", "")).strip()
+    try:
+        pdf.creation_date = datetime.strptime(
+            stamp[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+
+    t = topic or {}
+    pdf.add_page()
+    pdf.ln(58)
+    pdf.set_font(pdf.base, "B", 22)
+    pdf.set_text_color(*to_pdf.INK)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 11, pdf_safe(t.get("제목") or "제안서"))
+    pdf.ln(2)
+    pdf.set_font(pdf.base, "", 11)
+    pdf.set_text_color(*to_pdf.MUTED)
+    if t.get("한줄"):
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 6, pdf_safe(t["한줄"]))
+    pdf.ln(4)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 6, pdf_safe(f"{C.DATASET} · {C.PERIOD[0]} ~ {C.PERIOD[1]}"))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 6, pdf_safe("카드 최종 갱신 " + (stamp or "미상")))
+
+    for s in secs:
+        pdf.add_page()
+        pdf.set_font(pdf.base, "B", 14)
+        pdf.set_text_color(*to_pdf.INK)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 8, pdf_safe(s.get("제목", "")))
+        if s.get("질문"):
+            pdf.set_font(pdf.base, "", 9.5)
+            pdf.set_text_color(*to_pdf.MUTED)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 5.4, pdf_safe(s["질문"]))
+        pdf.ln(3)
+        pdf.set_draw_color(*to_pdf.LINE)
+        pdf.set_line_width(0.3)
+        pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+        pdf.ln(5)
+
+        lines = s.get("문장") or []
+        if not lines:
+            pdf.set_font(pdf.base, "", 10)
+            pdf.set_text_color(*to_pdf.MUTED)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6, pdf_safe(
+                "[작성되지 않음] " + str(s.get("placeholder", ""))))
+            continue
+        pdf.set_font(pdf.base, "", 10.5)
+        pdf.set_text_color(*to_pdf.INK)
+        for ln in lines:
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6.2, pdf_safe(ln))
+            pdf.ln(2)
+        if s.get("차트"):
+            pdf.set_font(pdf.base, "", 9)
+            pdf.set_text_color(*to_pdf.MUTED)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 5.4, pdf_safe(
+                f"[그림 {len(s['차트'])}개는 HTML 본에만 있습니다]"))
 
     return bytes(pdf.output())
